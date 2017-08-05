@@ -5,7 +5,7 @@ import collections
 import sys
 # An expression is just a tuple. We don't have to worry about that.
 
-EXTRA_VARIABLE_PENALTY = 0
+EXTRA_VARIABLE_PENALTY = 5
 
 # There are two types of atoms. Variables, and Globals.
 class Variable:
@@ -233,7 +233,9 @@ class Node:
         new_expressions = frozenset(substitute(x, leftover_bindings) for x in new_expressions)
 
         # Concatenate together the new expressions.
-        result = Node(self.expressions - frozenset((expression,)) | new_expressions, prev = (axiom, self), cost = self.cost + axiom.cost)
+        result = Node(self.expressions - frozenset((expression,)) | new_expressions, prev = (axiom, self),
+                cost = self.cost + axiom.cost + EXTRA_VARIABLE_PENALTY * len(leftovers)
+        )
 
         # And exists nodes
         for var in leftover_bindings.values():
@@ -294,7 +296,7 @@ class ExistsNode(Node):
     def __init__(self, var, subnode, prev = None):
         self.var = var
         self.subnode = subnode
-        self.cost = self.subnode.cost + EXTRA_VARIABLE_PENALTY
+        self.cost = self.subnode.cost
         self.prev = prev
 
         Node._id += 1
@@ -420,7 +422,7 @@ class ExistsNode(Node):
         final_set = frozenset(substitute(x, leftover_bindings) for x in final_set)
 
         # Wrap in exists as far as necessary
-        node = Node(final_set, prev = (axiom, self), cost = innermost_node.cost + axiom.cost)
+        node = Node(final_set, prev = (axiom, self), cost = innermost_node.cost + axiom.cost + EXTRA_VARIABLE_PENALTY * len(leftovers))
 
         for var in leftover_bindings.values():
             node = ExistsNode(var, node, prev = (axiom, self))
@@ -510,13 +512,29 @@ def main():
         ((), ('=', ('+', 'a', 'b'), ('+', 'b', 'a'))), # Commutativity
         ((), ('=', ('+', ('+', 'a', 'b'), 'c'), ('+', 'a', ('+', 'b', 'c')))), # Associativity
         ((), ('=', ('+', 'a', '0'), 'a')), # Definition of 0
-        ((('=', 'a', 'b'),), ('=', ('+', 'c', 'a'), ('+', 'c', 'b'))), # Weak invertibility
+        ((('=', 'a', 'b'),), ('=', ('+', 'c', 'a'), ('+', 'c', 'b'))), # Substitution law
+        ((('=', 'a', 'b'),), ('=', ('+', 'a', 'c'), ('+', 'c', 'b'))), # (four forms)
+        ((('=', 'a', 'b'),), ('=', ('+', 'c', 'a'), ('+', 'b', 'c'))), #
+        ((('=', 'a', 'b'),), ('=', ('+', 'a', 'c'), ('+', 'b', 'c'))), #
+
+        ((('=', ('+', 'c', 'a'), ('+', 'c', 'b')),), ('=', 'a', 'b')), # Cancellation law
+        ((('=', ('+', 'c', 'a'), ('+', 'b', 'c')),), ('=', 'a', 'b')), # (four forms)
+        ((('=', ('+', 'a', 'c'), ('+', 'c', 'b')),), ('=', 'a', 'b')), #
+        ((('=', ('+', 'a', 'c'), ('+', 'b', 'c')),), ('=', 'a', 'b')), #
 
         # MULTIPLICATION
         ((), ('=', ('*', 'a', 'b'), ('*', 'b', 'a'))), # Commutativity
         ((), ('=', ('*', ('*', 'a', 'b'), 'c'), ('*', 'a', ('*', 'b', 'c')))), # Associativity
         ((), ('=', ('*', ('+', 'a', 'b'), 'c'), ('+', ('*', 'a', 'b'), ('*', 'a', 'c')))), # Distributivity
-        ((('=', 'a', 'b'),), ('=', ('*', 'c', 'a'), ('*', 'c', 'b'))) # Weak invertibility
+        ((('=', 'a', 'b'),), ('=', ('*', 'c', 'a'), ('*', 'c', 'b'))), # Substitution law
+        ((('=', 'a', 'b'),), ('=', ('*', 'a', 'c'), ('*', 'c', 'b'))), # (four forms)
+        ((('=', 'a', 'b'),), ('=', ('*', 'c', 'a'), ('*', 'b', 'c'))), #
+        ((('=', 'a', 'b'),), ('=', ('*', 'a', 'c'), ('*', 'b', 'c'))), #
+
+        ((('=', ('*', 'c', 'a'), ('*', 'c', 'b')),), ('=', 'a', 'b')), # Cancellation law
+        ((('=', ('*', 'c', 'a'), ('*', 'b', 'c')),), ('=', 'a', 'b')), # (four forms)
+        ((('=', ('*', 'a', 'c'), ('*', 'c', 'b')),), ('=', 'a', 'b')), #
+        ((('=', ('*', 'a', 'c'), ('*', 'b', 'c')),), ('=', 'a', 'b')), #
     ]
 
     def extract_var_names(tpl):
@@ -548,12 +566,11 @@ def main():
     zero = globs['0']
 
     proof_lines = [
-        (eq, (times, a, (plus, a, zero)), (plus, zero, (times, a, (plus, a, zero)))),
-        (eq, (times, a, (plus, a, zero)), (plus, zero, (times, a, a))),
-        (eq, (times, a, (plus, a, zero)), (plus, (times, a, zero), (times, a, (plus, a, zero)))),
-        (eq, (times, a, (plus, a, zero)), (plus, (times, a, zero), (times, a, a))),
-        (eq, (plus, zero, (times, a, a)), (plus, (times, a, zero), (times, a, a))),
-        (eq, zero, (times, a, zero))
+        (eq, (times, a, (plus, a, zero)), (plus, zero, (times, a, (plus, a, zero)))), # a * (a + 0) = 0 + a * (a + 0)
+        (eq, (times, a, (plus, a, zero)), (plus, zero, (times, a, a))), # a * (a + 0) = 0 + a * a
+        (eq, (times, a, (plus, a, zero)), (plus, (times, a, zero), (times, a, a))), # a * (a + 0) = a * 0 + a * a
+        (eq, (plus, zero, (times, a, a)), (plus, (times, a, zero), (times, a, a))), # 0 + a * a = a * 0 + a * a
+        (eq, zero, (times, a, zero)) # QED
     ]
 
     '''
