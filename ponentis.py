@@ -1,48 +1,50 @@
 from itertools import chain
 import heapq
 from functools import reduce
+import collections
+import sys
 # An expression is just a tuple. We don't have to worry about that.
 
-EXTRA_VARIABLE_PENALTY = 1000
+EXTRA_VARIABLE_PENALTY = 0
 
 # There are two types of atoms. Variables, and Globals.
 class Variable:
     _id = 0
     def __init__(self, name):
         Variable._id += 1
-        self._id = Variable._id
+        self.id = Variable._id
         self.name = name
 
     def __hash__(self):
-        return hash(self._id)
+        return hash(self.id)
 
     def __eq__(self, other):
         if not isinstance(other, Variable):
             return False
 
-        return other._id == self._id
+        return other.id == self.id
 
 class Global:
     _id = 0
     def __init__(self, name):
         Variable._id += 1
-        self._id = Variable._id
+        self.id = Variable._id
         self.name = name
 
     def __hash__(self):
-        return hash(self._id)
+        return hash(self.id)
 
     def __eq__(self, other):
         if not isinstance(other, Global):
             return False
 
-        return other._id == self._id
+        return other.id == self.id
 
 # Utility functions
 def get_variables(expression):
     if isinstance(expression, Variable):
         return frozenset((expression,))
-    elif isinstance(expression, tuple):
+    elif isinstance(expression, collections.Iterable):
         return reduce((lambda x, y: x | y), (get_variables(x) for x in expression), frozenset())
     else:
         return frozenset()
@@ -67,8 +69,11 @@ class Axiom:
         return '%s => %s' % (' ^ '.join(print_expr(x) for x in self.inputs), print_expr(self.output))
 
 class NodeReader:
-    def __init__(self, node):
-        self.expressions = node.expressions
+    def __init__(self, node, expressions = None):
+        if expressions is not None:
+            self.expressions = expressions
+        else:
+            self.expressions = node.expressions
 
     def __hash__(self):
         return hash(self.expressions)
@@ -80,9 +85,43 @@ class NodeReader:
             return False
 
 class ExistsNodeReader:
-    def __init__(self, node):
-        self.var = node.var
-        self.subnode = node.subnode.read()
+    standard_vars = []
+
+    def __init__(self, node, var = None, subnode = None):
+        # Change all of the variables to standard variables
+        # so that equality can be compared.
+        if node is None:
+            self.var = var
+            self.subnode = subnode
+
+        else:
+            node_chain = [node]
+            while isinstance(node_chain[-1], ExistsNode):
+                if len(node_chain) > len(ExistsNodeReader.standard_vars):
+                    ExistsNodeReader.standard_vars.append(
+                        Variable(chr(ord('A')+len(ExistsNodeReader.standard_vars)))
+                    )
+                node_chain.append(node_chain[-1].subnode)
+
+            expressions = node_chain[-1].expressions
+
+            # Determine which standard variable to take
+            node = NodeReader(
+                None,
+                expressions = frozenset(substitute(x,
+                    {n.var: ExistsNodeReader.standard_vars[i] for i, n in enumerate(node_chain[:-1])}
+                ) for x in expressions)
+            )
+
+            for i in range(len(node_chain) - 2):
+                node = ExistsNodeReader(
+                    None,
+                    var = ExistsNodeReader.standard_vars[i],
+                    subnode = node
+                )
+
+            self.var = ExistsNodeReader.standard_vars[len(node_chain) - 2]
+            self.subnode = node
 
     def __hash__(self):
         return hash((self.var, self.subnode))
@@ -93,23 +132,55 @@ class ExistsNodeReader:
         else:
             return False
 
-def print_expr(expr):
+def print_expr(expr, vnames = None, vcounters = None):
+    if vnames is None:
+        vnames = {}
+    if vcounters is None:
+        vcounters = {}
+
+    if expr is None:
+        return 'None'
+
     if isinstance(expr, Variable) or isinstance(expr, Global):
-        return expr.name
+        #return '%s:%d' % (expr.name,expr.id)
+        if expr in vnames:
+            return vnames[expr]
+        elif expr.name in vcounters:
+            vcounters[expr.name] += 1
+            vnames[expr] = '%s%d' % (expr.name, vcounters[expr.name])
+            return vnames[expr]
+        else:
+            vcounters[expr.name] = 0
+            vnames[expr] = expr.name
+            return expr.name
+
+    elif isinstance(expr, str):
+        return expr
+
     else:
-        return '(%s)' % (' '.join(print_expr(x) for x in expr))
+        return '(%s)' % (' '.join(print_expr(x, vnames, vcounters) for x in expr))
+
+contains_none = lambda x: (x is None) or (isinstance(x, collections.Iterable) and any(contains_none(k) for k in x))
+
+print(contains_none(None))
+print(contains_none((1, None)))
+print(contains_none((1, (2, None))))
 
 # A Node in the search graph. (expressions) is a tuple of tuples,
 # where each tuple is an expression, and the Node represents their conjunction.
 # It knows how to FORWARD expand.
 class Node:
     _id = 0
-    def __init__(self, expressions, prev = None):
+    def __init__(self, expressions, prev = None, cost = 0):
+        if contains_none(expressions):
+            raise Exception('waht')
+
         Node._id += 1
         self.id = Node._id
 
         self.expressions = expressions
         self.prev = prev
+        self.cost = cost
 
     def read(self):
         return NodeReader(self)
@@ -148,10 +219,7 @@ class Node:
 
         # Hey, we're valid! Bindings have been generated, too.
         # Substitute them into the axiom inputs.
-        new_expressions = frozenset(substitute(x, bindings) for x in axiom.inputs)
-
-        # Concatenate together the new expressions.
-        result = Node(self.expressions - frozenset((expression,)) | new_expressions, prev = (axiom, self))
+        new_expressions = (substitute(x, bindings) for x in axiom.inputs)
 
         # LEFTOVERS PROCEDURE
         # ===================
@@ -162,9 +230,14 @@ class Node:
         # Create Exists variables for each of the leftover bindings
         leftover_bindings = {x: Variable(x.name) for x in leftovers}
 
+        new_expressions = frozenset(substitute(x, leftover_bindings) for x in new_expressions)
+
+        # Concatenate together the new expressions.
+        result = Node(self.expressions - frozenset((expression,)) | new_expressions, prev = (axiom, self), cost = self.cost + axiom.cost)
+
         # And exists nodes
         for var in leftover_bindings.values():
-            result = ExistsNode(var, result, prev = (axiom, self), cost = result.cost + VCOST)
+            result = ExistsNode(var, result, prev = (axiom, self))
 
         # Return.
         return result
@@ -173,7 +246,7 @@ class Node:
         return (x for x in (self.forward_expand_axiom_index(axiom, expr) for expr in self.expressions) if x is not None)
 
     def forward_expand(self, axiom_list, cost):
-        return ((cost + axiom.cost, x) for axiom in axiom_list for x in self.forward_expand_axiom(axiom))
+        return (x for axiom in axiom_list for x in self.forward_expand_axiom(axiom))
 
     def expand(self, axiom_list, cost):
         return self.forward_expand(axiom_list, cost)
@@ -181,14 +254,31 @@ class Node:
     def replace_innermost_node(self, node):
         return node
 
+    def expr_for_printing(self):
+        r = []
+        for expr in self.expressions:
+            r.append(expr)
+            r.append('&&')
+
+        return tuple(r[:-1])
+
     def print(self):
-        return ' && '.join(print_expr(expr) for expr in self.expressions)
+        return print_expr(self.expr_for_printing())
+
+    def innermost_expressions(self):
+        return self.expressions
+
+    def __le__(self, other):
+        return self.cost <= other.cost
+
+    def __ge__(self, other):
+        return self.cost >= other.cost
 
     def __lt__(self, other):
-        return self.id < other.id
+        return self.cost < other.cost
 
     def __gt__(self, other):
-        return self.id > other.id
+        return self.cost > other.cost
 
 # An ExistsNode is a wrapper for an expression where a variable is unbound
 # and possibilities for it need to be explored.
@@ -204,27 +294,41 @@ class ExistsNode(Node):
     def __init__(self, var, subnode, prev = None):
         self.var = var
         self.subnode = subnode
+        self.cost = self.subnode.cost + EXTRA_VARIABLE_PENALTY
         self.prev = prev
 
         Node._id += 1
         self.id = Node._id
 
+    def wrap_if_necessary(self, subnode):
+        varset = get_variables(subnode.innermost_expressions())
+        if self.var in varset:
+            return ExistsNode(self.var, subnode, prev = (subnode.prev[0], self))
+        else:
+            return subnode
+
     def read(self):
         return ExistsNodeReader(self)
 
     def forward_expand(self, axiom_list, cost):
-        return ((y, ExistsNode(self.var, x, prev = (x.prev[0], self))) for y, x in self.subnode.forward_expand(axiom_list, cost))
+        return (
+            self.wrap_if_necessary(x)
+            for x in self.subnode.forward_expand(axiom_list, cost)
+        )
 
     def replace_innermost_node(self, new_node):
-        return ExistsNode(self.var, self.subnode.replace_innermost_node(new_node), prev = (new_node.prev[0], self))
+        return self.wrap_if_necessary(self.subnode.replace_innermost_node(new_node))
 
-    def backward_expand_axiom(self, axiom):
+    def backward_expand_axiom_expr(self, axiom, innermost_expression):
+        # If the innermost expression doesn't contain our variable, we
+        # can't do a binding.
+        if self.var not in get_variables(innermost_expression):
+            return None
+
         # Get the expression we're going to want to match against.
         innermost_node = self
         while isinstance(innermost_node, ExistsNode):
             innermost_node = innermost_node.subnode
-        innermost_expression = next(iter(innermost_node.expressions))
-
 
         # Bindings for a BACKWARDS step need to happen in two stages.
 
@@ -275,6 +379,8 @@ class ExistsNode(Node):
         backward_binding = None
 
         def backward_check(axiom_output, my_expression):
+            nonlocal backward_binding
+
             if my_expression == self.var:
                 if backward_binding is not None:
                     return backward_binding == axiom_output
@@ -314,7 +420,7 @@ class ExistsNode(Node):
         final_set = frozenset(substitute(x, leftover_bindings) for x in final_set)
 
         # Wrap in exists as far as necessary
-        node = Node(final_set, prev = (axiom, self))
+        node = Node(final_set, prev = (axiom, self), cost = innermost_node.cost + axiom.cost)
 
         for var in leftover_bindings.values():
             node = ExistsNode(var, node, prev = (axiom, self))
@@ -322,43 +428,58 @@ class ExistsNode(Node):
         # Replace innermost node with the new one
         return self.replace_innermost_node(node)
 
+    def innermost_expressions(self):
+        node = self
+        while isinstance(node, ExistsNode):
+            node = node.subnode
+        return node.expressions
+
     def backward_expand(self, axiom_list, cost):
-        return ((cost + axiom.cost, x) for axiom, x in ((axiom, self.backward_expand_axiom(axiom)) for axiom in axiom_list) if x is not None)
+        return (x for x in (self.backward_expand_axiom_expr(axiom, expr) for expr in self.innermost_expressions() for axiom in axiom_list) if x is not None)
 
     def expand(self, axiom_list, cost):
         return chain(self.forward_expand(axiom_list, cost), self.backward_expand(axiom_list, cost))
 
+    def expr_for_printing(self):
+        return ('exists', self.var, '.', self.subnode.expr_for_printing())
+
     def print(self):
-        return 'exists %s. %s' % (self.var.name, self.subnode.print())
+        return print_expr(self.expr_for_printing())
 
 # The GOAL NODE
-GOAL = Node(frozenset())
+GOAL = Node(frozenset()).read()
 
 # Engage in some kinda graph search!
 def try_proving(statement, axiom_list, max_cost = 1e6):
     # Dijkstra's algorithm.
     frontier = [
-        (0, Node(frozenset((statement,))))
+        Node(frozenset((statement,)))
     ]
 
     visited = {
-        frontier[0][1].read(): frontier[0][1]
+        frontier[0].read(): frontier[0]
     }
 
     while GOAL not in visited:
-        cost, removed = heapq.heappop(frontier)
+        removed = heapq.heappop(frontier)
 
-        print('------')
-        print('EXPANDING NODE: %s' % (removed.print(),))
+        '''
+        if not isinstance(removed, ExistsNode):
+            print('CANDIDATE INTERMEDIARY (%f): %s' % (removed.cost, removed.print(),))
+            sys.stdout.flush()
+        '''
 
-        if cost > max_cost:
+        #print('------')
+        #print('EXPANDING NODE (cost %f): %s' % (removed.cost, removed.print(),))
+
+        if removed.cost > max_cost:
             return None
 
-        for new_pair in removed.expand(axiom_list, cost):
-            if new_pair[1].read() not in visited:
-                print('Adding: %s' % (new_pair[1].print(),))
+        for new_pair in removed.expand(axiom_list, removed.cost):
+            if new_pair.read() not in visited:
+                #print('Adding (cost %f): %s by axiom %s' % (new_pair.cost, new_pair.print(), new_pair.prev[0].print()))
                 heapq.heappush(frontier, new_pair)
-                visited[new_pair[1].read()] = new_pair[1]
+                visited[new_pair.read()] = new_pair
 
     # Chain of reasoning:
     goal_node = visited[GOAL]
@@ -389,11 +510,13 @@ def main():
         ((), ('=', ('+', 'a', 'b'), ('+', 'b', 'a'))), # Commutativity
         ((), ('=', ('+', ('+', 'a', 'b'), 'c'), ('+', 'a', ('+', 'b', 'c')))), # Associativity
         ((), ('=', ('+', 'a', '0'), 'a')), # Definition of 0
+        ((('=', 'a', 'b'),), ('=', ('+', 'c', 'a'), ('+', 'c', 'b'))), # Weak invertibility
 
         # MULTIPLICATION
         ((), ('=', ('*', 'a', 'b'), ('*', 'b', 'a'))), # Commutativity
         ((), ('=', ('*', ('*', 'a', 'b'), 'c'), ('*', 'a', ('*', 'b', 'c')))), # Associativity
-        ((), ('=', ('*', ('+', 'a', 'b'), 'c'), ('+', ('*', 'a', 'b'), ('*', 'a', 'c')))) # Distributivity
+        ((), ('=', ('*', ('+', 'a', 'b'), 'c'), ('+', ('*', 'a', 'b'), ('*', 'a', 'c')))), # Distributivity
+        ((('=', 'a', 'b'),), ('=', ('*', 'c', 'a'), ('*', 'c', 'b'))) # Weak invertibility
     ]
 
     def extract_var_names(tpl):
@@ -419,16 +542,39 @@ def main():
     # the distributive property to say a * (b + a) = a * b + a * a
 
     a = Variable('a')
-    b = Variable('b')
     times = globs['*']
     plus = globs['+']
     eq = globs['=']
+    zero = globs['0']
 
-    goal = (eq, (times, a, (plus, a, b)), (plus, (times, a, b), (times, a, a)))
+    proof_lines = [
+        (eq, (times, a, (plus, a, zero)), (plus, zero, (times, a, (plus, a, zero)))),
+        (eq, (times, a, (plus, a, zero)), (plus, zero, (times, a, a))),
+        (eq, (times, a, (plus, a, zero)), (plus, (times, a, zero), (times, a, (plus, a, zero)))),
+        (eq, (times, a, (plus, a, zero)), (plus, (times, a, zero), (times, a, a))),
+        (eq, (plus, zero, (times, a, a)), (plus, (times, a, zero), (times, a, a))),
+        (eq, zero, (times, a, zero))
+    ]
+
+    '''
+    goal = (eq,
+            (plus, (times, a, b), (times, a, a)),
+            (times, a, (plus, a, b)))
+
+    goal = (eq, (times, a, zero), zero)
 
     result = try_proving(goal, axiom_list)
+    '''
 
-    print(result)
+    for line in proof_lines:
+        result = try_proving(line, axiom_list)
+
+        print('DISCOVERED THE FOLLOWING PROOF:')
+        for piece in result:
+            print('By axiom %s we have:' % (piece[0].print(),))
+            print(piece[1].print())
+
+        axiom_list += (Axiom((), substitute(line, {a: Variable('a')})),)
 
     return
 
