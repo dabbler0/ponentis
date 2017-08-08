@@ -5,15 +5,15 @@ Ponentis is a small formal logic system right now with the goal of eventually be
 
 The following are goals for this project:
 
-    - A good enough ATP to recognize as correct any line in a proof that should be obvious as formally valid to an untrained reader.
-    - An interactive rendering system that can render only parts of proofs but expand when necessary, so that you can "explore" parts of summarized proofs you want to formalized or don't understand.
-    - Readable, "literate" input style a la [knuth](http://www-cs-faculty.stanford.edu/~knuth/lp.html)
-    - Output to at least one of the several functional formal proof languages (scheme/haskell/etc.)
-    - Output to a human-readable, natural language but fully formalized proof
+  - A good enough ATP to recognize as correct any line in a proof that should be obvious as formally valid to an untrained reader.
+  - An interactive rendering system that can render only parts of proofs but expand when necessary, so that you can "explore" parts of summarized proofs you want to formalized or don't understand.
+  - Readable, "literate" input style a la [knuth](http://www-cs-faculty.stanford.edu/~knuth/lp.html)
+  - Output to at least one of the several functional formal proof languages (scheme/haskell/etc.)
+  - Output to a human-readable, natural language but fully formalized proof
 
 The following are not goals for this project:
 
-    - To be a good ATP
+  - To be a good ATP
 
 There is currently no input parser, but the goal is for input to eventually look like this:
 
