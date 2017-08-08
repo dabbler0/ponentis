@@ -6,6 +6,15 @@ import sys
 # An expression is just a tuple. We don't have to worry about that.
 
 EXTRA_VARIABLE_PENALTY = 5
+EXTRA_TERM_PENALTY = 0
+SIZE_PENALTY = 0.1
+BACKWARD_EXPANSION_REDUCTION = .3
+
+def size_estimate(expression):
+    if isinstance(expression, collections.Iterable):
+        return sum(size_estimate(x) for x in expression)
+    else:
+        return 1
 
 # There are two types of atoms. Variables, and Globals.
 class Variable:
@@ -24,12 +33,15 @@ class Variable:
 
         return other.id == self.id
 
+DEFAULT = 0
+BINARY_INFIX = 1
 class Global:
     _id = 0
-    def __init__(self, name):
+    def __init__(self, name, print_style = DEFAULT):
         Variable._id += 1
         self.id = Variable._id
         self.name = name
+        self.print_style = print_style
 
     def __hash__(self):
         return hash(self.id)
@@ -59,14 +71,46 @@ def substitute(expression, mapping):
 
 # An Axiom relates a collection of inputs to an output.
 class Axiom:
-    def __init__(self, inputs, output, cost = 1.0):
-        self.inputs = inputs
-        self.output = output
+    standard_variables = []
+
+    def __init__(self, inputs, output, name, cost = 1.0):
         self.cost = cost
-        self.required_bindings = reduce((lambda x, y: x | y), (get_variables(x) for x in self.inputs), frozenset())
+        self.name = name
+        all_vars = reduce((lambda x, y: x | y), (get_variables(x) for x in inputs), frozenset())
+
+        while len(all_vars) > len(Axiom.standard_variables):
+            Axiom.standard_variables.append(Variable(chr(ord('a') + len(Axiom.standard_variables))))
+
+        mapping = {v: Axiom.standard_variables[i] for i, v in enumerate(all_vars)}
+
+        self.inputs = frozenset(substitute(x, mapping) for x in inputs)
+        self.output = substitute(output, mapping)
+        self.required_bindings = frozenset(Axiom.standard_variables[:len(all_vars)])
 
     def print(self):
-        return '%s => %s' % (' ^ '.join(print_expr(x) for x in self.inputs), print_expr(self.output))
+        '''
+        r = []
+        for expr in self.inputs:
+            r.append(expr)
+            r.append(',')
+        r = r[:-1]
+
+        r.append('=>')
+        r.append(self.output)
+
+        #return '%s => %s' % (' && '.join(print_expr(x) for x in self.inputs), print_expr(self.output))
+        return print_expr(r)
+        '''
+        return self.name
+
+    def is_strictly_worse_than(self, other):
+        return self.output == other.output and self.inputs >= other.inputs
+
+    def __hash__(self):
+        return hash((self.inputs, self.output))
+
+    def __eq__(self, other):
+        return (self.inputs == other.inputs) and self.output == other.output
 
 class NodeReader:
     def __init__(self, node, expressions = None):
@@ -86,6 +130,9 @@ class NodeReader:
 
 class ExistsNodeReader:
     standard_vars = []
+
+    def depth(self):
+        return self.subnode.depth() + 1
 
     def __init__(self, node, var = None, subnode = None):
         # Change all of the variables to standard variables
@@ -141,8 +188,7 @@ def print_expr(expr, vnames = None, vcounters = None):
     if expr is None:
         return 'None'
 
-    if isinstance(expr, Variable) or isinstance(expr, Global):
-        #return '%s:%d' % (expr.name,expr.id)
+    if isinstance(expr, Variable):
         if expr in vnames:
             return vnames[expr]
         elif expr.name in vcounters:
@@ -154,27 +200,36 @@ def print_expr(expr, vnames = None, vcounters = None):
             vnames[expr] = expr.name
             return expr.name
 
+    elif isinstance(expr, Global):
+        return expr.name
+
+    elif expr[0] == 'exists':
+        return '\u2203%s.%s' % (print_expr(expr[1], vnames, vcounters), print_expr(expr[3], vnames, vcounters))
+
+    elif expr[0] == 'conjunction':
+        return ' \u2227 '.join(print_expr(x, vnames, vcounters) for x in expr[1])
+
     elif isinstance(expr, str):
         return expr
 
+    elif isinstance(expr[0], Global) and expr[0].print_style == BINARY_INFIX:
+        return '(%s %s %s)' % (print_expr(expr[1]), expr[0].name, print_expr(expr[2]))
+
+    elif len(expr) == 1:
+        return print_expr(expr[0], vnames, vcounters)
+
     else:
         return '(%s)' % (' '.join(print_expr(x, vnames, vcounters) for x in expr))
-
-contains_none = lambda x: (x is None) or (isinstance(x, collections.Iterable) and any(contains_none(k) for k in x))
-
-print(contains_none(None))
-print(contains_none((1, None)))
-print(contains_none((1, (2, None))))
 
 # A Node in the search graph. (expressions) is a tuple of tuples,
 # where each tuple is an expression, and the Node represents their conjunction.
 # It knows how to FORWARD expand.
 class Node:
     _id = 0
-    def __init__(self, expressions, prev = None, cost = 0):
-        if contains_none(expressions):
-            raise Exception('waht')
+    def depth(self):
+        return 0
 
+    def __init__(self, expressions, prev = None, cost = 0):
         Node._id += 1
         self.id = Node._id
 
@@ -187,6 +242,7 @@ class Node:
 
     # FORWARD EXPANSION using AXIOM and statement INDEX
     def forward_expand_axiom_index(self, axiom, expression):
+        #print('Trying forward expansion', axiom.print(), 'with', print_expr(expression))
         # FORWARD PASS
         # ============
         bindings = {}
@@ -215,6 +271,7 @@ class Node:
 
         # Check validity and generate bindings
         if not check_validity(axiom.output, expression):
+            #print('failed.')
             return None
 
         # Hey, we're valid! Bindings have been generated, too.
@@ -234,12 +291,16 @@ class Node:
 
         # Concatenate together the new expressions.
         result = Node(self.expressions - frozenset((expression,)) | new_expressions, prev = (axiom, self),
-                cost = self.cost + axiom.cost + EXTRA_VARIABLE_PENALTY * len(leftovers)
+                cost = (
+                    self.cost + axiom.cost + EXTRA_VARIABLE_PENALTY * len(leftovers) +
+                    EXTRA_TERM_PENALTY * (len(new_expressions) - 1) + SIZE_PENALTY * (size_estimate(new_expressions) - size_estimate({expression}))
+                )
         )
 
         # And exists nodes
         for var in leftover_bindings.values():
             result = ExistsNode(var, result, prev = (axiom, self))
+        #print('success! as %d' % (result.id,))
 
         # Return.
         return result
@@ -247,22 +308,17 @@ class Node:
     def forward_expand_axiom(self, axiom):
         return (x for x in (self.forward_expand_axiom_index(axiom, expr) for expr in self.expressions) if x is not None)
 
-    def forward_expand(self, axiom_list, cost):
+    def forward_expand(self, axiom_list):
         return (x for axiom in axiom_list for x in self.forward_expand_axiom(axiom))
 
-    def expand(self, axiom_list, cost):
-        return self.forward_expand(axiom_list, cost)
+    def expand(self, axiom_list):
+        return self.forward_expand(axiom_list)
 
     def replace_innermost_node(self, node):
         return node
 
     def expr_for_printing(self):
-        r = []
-        for expr in self.expressions:
-            r.append(expr)
-            r.append('&&')
-
-        return tuple(r[:-1])
+        return ('conjunction', self.expressions)
 
     def print(self):
         return print_expr(self.expr_for_printing())
@@ -281,6 +337,20 @@ class Node:
 
     def __gt__(self, other):
         return self.cost > other.cost
+    '''
+
+    def __le__(self, other):
+        return self.depth() <= other.depth() or self.depth() == other.depth() and self.cost <= other.cost
+
+    def __ge__(self, other):
+        return self.depth() >= other.depth() or self.depth() == other.depth() and self.cost >= other.cost
+
+    def __lt__(self, other):
+        return self.depth() < other.depth() or self.depth() == other.depth() and self.cost < other.cost
+
+    def __gt__(self, other):
+        return self.depth() > other.depth() or self.depth() == other.depth() and self.cost > other.cost
+    '''
 
 # An ExistsNode is a wrapper for an expression where a variable is unbound
 # and possibilities for it need to be explored.
@@ -312,10 +382,10 @@ class ExistsNode(Node):
     def read(self):
         return ExistsNodeReader(self)
 
-    def forward_expand(self, axiom_list, cost):
+    def forward_expand(self, axiom_list):
         return (
             self.wrap_if_necessary(x)
-            for x in self.subnode.forward_expand(axiom_list, cost)
+            for x in self.subnode.forward_expand(axiom_list)
         )
 
     def replace_innermost_node(self, new_node):
@@ -422,7 +492,12 @@ class ExistsNode(Node):
         final_set = frozenset(substitute(x, leftover_bindings) for x in final_set)
 
         # Wrap in exists as far as necessary
-        node = Node(final_set, prev = (axiom, self), cost = innermost_node.cost + axiom.cost + EXTRA_VARIABLE_PENALTY * len(leftovers))
+        node = Node(final_set, prev = (axiom, self), cost = (
+                innermost_node.cost + (axiom.cost + EXTRA_VARIABLE_PENALTY * len(leftovers) +
+                EXTRA_TERM_PENALTY * len(new_expressions) +
+                SIZE_PENALTY * size_estimate(new_expressions)) * BACKWARD_EXPANSION_REDUCTION
+            )
+        )
 
         for var in leftover_bindings.values():
             node = ExistsNode(var, node, prev = (axiom, self))
@@ -436,11 +511,19 @@ class ExistsNode(Node):
             node = node.subnode
         return node.expressions
 
-    def backward_expand(self, axiom_list, cost):
+    def backward_expand_only_me(self, axiom_list):
         return (x for x in (self.backward_expand_axiom_expr(axiom, expr) for expr in self.innermost_expressions() for axiom in axiom_list) if x is not None)
 
-    def expand(self, axiom_list, cost):
-        return chain(self.forward_expand(axiom_list, cost), self.backward_expand(axiom_list, cost))
+    def backward_expand(self, axiom_list):
+        if isinstance(self.subnode, ExistsNode):
+            return chain(
+                (self.wrap_if_necessary(x) for x in self.subnode.backward_expand(axiom_list)),
+                self.backward_expand_only_me(axiom_list))
+        else:
+            return self.backward_expand_only_me(axiom_list)
+
+    def expand(self, axiom_list):
+        return chain(self.forward_expand(axiom_list), self.backward_expand(axiom_list))
 
     def expr_for_printing(self):
         return ('exists', self.var, '.', self.subnode.expr_for_printing())
@@ -450,6 +533,12 @@ class ExistsNode(Node):
 
 # The GOAL NODE
 GOAL = Node(frozenset()).read()
+
+def history_length(x):
+    if x.prev is None:
+        return 1
+    else:
+        return 1 + history_length(x.prev[1])
 
 # Engage in some kinda graph search!
 def try_proving(statement, axiom_list, max_cost = 1e6):
@@ -467,21 +556,25 @@ def try_proving(statement, axiom_list, max_cost = 1e6):
 
         '''
         if not isinstance(removed, ExistsNode):
-            print('CANDIDATE INTERMEDIARY (%f): %s' % (removed.cost, removed.print(),))
+            print('CANDIDATE NODE (cost %f, length %d): %s' % (removed.cost, history_length(removed), removed.print()))
             sys.stdout.flush()
-        '''
 
+        '''
         #print('------')
-        #print('EXPANDING NODE (cost %f): %s' % (removed.cost, removed.print(),))
+        #print('EXPANDING NODE (cost %f, length %d, id %d, from %d): %s' % (removed.cost, history_length(removed), removed.id, removed.prev[1].id if removed.prev is not None else -1, removed.print()))
 
         if removed.cost > max_cost:
             return None
 
-        for new_pair in removed.expand(axiom_list, removed.cost):
+        for new_pair in removed.expand(axiom_list):
+            #print('considering inserting', new_pair.id)
             if new_pair.read() not in visited:
                 #print('Adding (cost %f): %s by axiom %s' % (new_pair.cost, new_pair.print(), new_pair.prev[0].print()))
                 heapq.heappush(frontier, new_pair)
                 visited[new_pair.read()] = new_pair
+            else:
+                #print('I already have a node like this:', visited[new_pair.read()].id)
+                pass
 
     # Chain of reasoning:
     goal_node = visited[GOAL]
@@ -493,48 +586,82 @@ def try_proving(statement, axiom_list, max_cost = 1e6):
 
     return reasoning
 
+def forward_extend_axiom_list(axiom_list, layers):
+    for i in range(layers):
+        new_axioms = []
+        flagged = set()
+        for axiom in axiom_list:
+            init_mapping = {v: Variable(v.name) for v in axiom.required_bindings}
+            begin = Node(frozenset(substitute(x, init_mapping) for x in axiom.inputs))
+            out_exprs = substitute(axiom.output, init_mapping)
+
+            results = begin.expand(axiom_list)
+
+            for result in results:
+                in_exprs = result.innermost_expressions()
+
+                if len(in_exprs) == 0:
+                    continue
+
+                new_axiom = Axiom(in_exprs, out_exprs)
+
+                # Make sure this new axiom is not strictly worse than
+                # some other axiom in the axiom list.
+                is_bad = False
+                for test_axiom in chain(axiom_list, new_axioms):
+                    if new_axiom.is_strictly_worse_than(test_axiom):
+                        is_bad = True
+                        break
+                    elif test_axiom.is_strictly_worse_than(new_axiom):
+                        flagged.add(test_axiom)
+
+                if is_bad:
+                    continue
+                else:
+                    '''
+                    print('NEW AXIOM:')
+                    print('  %s' % (new_axiom.print(),))
+                    print('  This comes from:')
+                    print('    %s' % (axiom.print(),))
+                    print('    %s' % (result.prev[0].print(),))
+                    '''
+                    new_axioms.append(new_axiom)
+
+        axiom_list.extend(new_axioms)
+        axiom_list = [axiom for axiom in axiom_list if axiom not in flagged]
+
+        print('layer', i, 'length', len(axiom_list))
+
+    return axiom_list
+
 # TESTS
 def main():
     globs = {
-        '=': Global('='),
-        '+': Global('+'),
-        '*': Global('*'),
+        '=': Global('=', print_style = BINARY_INFIX),
+        '+': Global('+', print_style = BINARY_INFIX),
+        '*': Global('*', print_style = BINARY_INFIX),
         '0': Global('0')
     }
 
     axiom_list = [
         # EQUALITY
-        ((), ('=', 'a', 'a')), # Reflexivity
-        ((('=', 'b', 'a'),), ('=', 'a', 'b')), # Commutativity
-        ((('=', 'a', 'b'), ('=', 'b', 'c')), ('=', 'a', 'c')), # Transitivity
+        ((), ('=', 'a', 'a'), 'the reflexive property of equality'), # Reflexivity
+        ((('=', 'b', 'a'),), ('=', 'a', 'b'), 'the commutative property of equality'), # Commutativity
+        ((('=', 'a', 'b'), ('=', 'b', 'c')), ('=', 'a', 'c'), 'the transitive property of equality'), # Transitivity
 
         # ADDITION
-        ((), ('=', ('+', 'a', 'b'), ('+', 'b', 'a'))), # Commutativity
-        ((), ('=', ('+', ('+', 'a', 'b'), 'c'), ('+', 'a', ('+', 'b', 'c')))), # Associativity
-        ((), ('=', ('+', 'a', '0'), 'a')), # Definition of 0
-        ((('=', 'a', 'b'),), ('=', ('+', 'c', 'a'), ('+', 'c', 'b'))), # Substitution law
-        ((('=', 'a', 'b'),), ('=', ('+', 'a', 'c'), ('+', 'c', 'b'))), # (four forms)
-        ((('=', 'a', 'b'),), ('=', ('+', 'c', 'a'), ('+', 'b', 'c'))), #
-        ((('=', 'a', 'b'),), ('=', ('+', 'a', 'c'), ('+', 'b', 'c'))), #
-
-        ((('=', ('+', 'c', 'a'), ('+', 'c', 'b')),), ('=', 'a', 'b')), # Cancellation law
-        ((('=', ('+', 'c', 'a'), ('+', 'b', 'c')),), ('=', 'a', 'b')), # (four forms)
-        ((('=', ('+', 'a', 'c'), ('+', 'c', 'b')),), ('=', 'a', 'b')), #
-        ((('=', ('+', 'a', 'c'), ('+', 'b', 'c')),), ('=', 'a', 'b')), #
+        ((), ('=', ('+', 'a', 'b'), ('+', 'b', 'a')), 'the commutative property of addition'), # Commutativity
+        ((), ('=', ('+', ('+', 'a', 'b'), 'c'), ('+', 'a', ('+', 'b', 'c'))), 'the associative property of addition'), # Associativity
+        ((), ('=', ('+', 'a', '0'), 'a'), 'the definition of the additive identity'), # Definition of 0
+        ((('=', 'a', 'b'),), ('=', ('+', 'c', 'a'), ('+', 'c', 'b')), 'the substitution law for addition'), # Substitution law
+        ((('=', ('+', 'c', 'a'), ('+', 'c', 'b')),), ('=', 'a', 'b'), 'the cancellation law for addition'), # Cancellation law
 
         # MULTIPLICATION
-        ((), ('=', ('*', 'a', 'b'), ('*', 'b', 'a'))), # Commutativity
-        ((), ('=', ('*', ('*', 'a', 'b'), 'c'), ('*', 'a', ('*', 'b', 'c')))), # Associativity
-        ((), ('=', ('*', ('+', 'a', 'b'), 'c'), ('+', ('*', 'a', 'b'), ('*', 'a', 'c')))), # Distributivity
-        ((('=', 'a', 'b'),), ('=', ('*', 'c', 'a'), ('*', 'c', 'b'))), # Substitution law
-        ((('=', 'a', 'b'),), ('=', ('*', 'a', 'c'), ('*', 'c', 'b'))), # (four forms)
-        ((('=', 'a', 'b'),), ('=', ('*', 'c', 'a'), ('*', 'b', 'c'))), #
-        ((('=', 'a', 'b'),), ('=', ('*', 'a', 'c'), ('*', 'b', 'c'))), #
-
-        ((('=', ('*', 'c', 'a'), ('*', 'c', 'b')),), ('=', 'a', 'b')), # Cancellation law
-        ((('=', ('*', 'c', 'a'), ('*', 'b', 'c')),), ('=', 'a', 'b')), # (four forms)
-        ((('=', ('*', 'a', 'c'), ('*', 'c', 'b')),), ('=', 'a', 'b')), #
-        ((('=', ('*', 'a', 'c'), ('*', 'b', 'c')),), ('=', 'a', 'b')), #
+        ((), ('=', ('*', 'a', 'b'), ('*', 'b', 'a')), 'the commutative property of multiplication'), # Commutativity
+        ((), ('=', ('*', ('*', 'a', 'b'), 'c'), ('*', 'a', ('*', 'b', 'c'))), 'the associative property of multiplication'), # Associativity
+        ((), ('=', ('*', ('+', 'a', 'b'), 'c'), ('+', ('*', 'a', 'b'), ('*', 'a', 'c'))), 'the distributive law for multiplication over addition'), # Distributivity
+        ((('=', 'a', 'b'),), ('=', ('*', 'c', 'a'), ('*', 'c', 'b')), 'the substitution law for multiplication'), # Substitution law
+        ((('=', ('*', 'c', 'a'), ('*', 'c', 'b')),), ('=', 'a', 'b'), 'the cancellation law for multiplication'), # Cancellation law
     ]
 
     def extract_var_names(tpl):
@@ -547,14 +674,19 @@ def main():
         return reduce((lambda x, y: x | y), (extract_var_names(x) for x in tpl), set())
 
     def make_axiom_out_of(tpl):
+        a, b, c = tpl
+        tpl = (a, b)
         vnames = extract_var_names(tpl)
         vs = {name: Variable(name) for name in vnames}
         tpl = substitute(tpl, globs)
         tpl = substitute(tpl, vs)
 
-        return Axiom(tpl[0], tpl[1])
+        return Axiom(tpl[0], tpl[1], c)
 
-    axiom_list = tuple(make_axiom_out_of(x) for x in axiom_list)
+    axiom_list = [make_axiom_out_of(x) for x in axiom_list]
+
+    # Do 4 layers of forward inferential conclusions
+    # forward_extend_axiom_list(axiom_list, 4)
 
     # Let's construct the proof goal. Right now I just want to use
     # the distributive property to say a * (b + a) = a * b + a * a
@@ -573,25 +705,23 @@ def main():
         (eq, zero, (times, a, zero)) # QED
     ]
 
-    '''
-    goal = (eq,
-            (plus, (times, a, b), (times, a, a)),
-            (times, a, (plus, a, b)))
-
-    goal = (eq, (times, a, zero), zero)
-
-    result = try_proving(goal, axiom_list)
-    '''
-
-    for line in proof_lines:
+    for i, line in enumerate(proof_lines):
         result = try_proving(line, axiom_list)
 
-        print('DISCOVERED THE FOLLOWING PROOF:')
-        for piece in result:
-            print('By axiom %s we have:' % (piece[0].print(),))
-            print(piece[1].print())
+        for j, piece in enumerate(result):
+            if j == 0:
+                print('\nBy %s we have:' % (piece[0].print(),))
+            else:
+                print('Then by %s we have:' % (piece[0].print(),))
 
-        axiom_list += (Axiom((), substitute(line, {a: Variable('a')})),)
+            if j == len(result) - 1:
+                print('  %s [%d]' % (piece[1].print(), i))
+            else:
+                print('  %s' % (piece[1].print(),))
+
+        axiom_list += (Axiom((), substitute(line, {a: Variable('a')}), '[%d]' % (i,)),)
+
+    print('QED')
 
     return
 
