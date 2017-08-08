@@ -10,6 +10,7 @@ The following are goals for this project:
   - Readable, "literate" input style a la [knuth](http://www-cs-faculty.stanford.edu/~knuth/lp.html)
   - Output to at least one of the several functional formal proof languages (scheme/haskell/etc.)
   - Output to a human-readable, natural language but fully formalized proof
+  - Runnable in the browser (will compile with [Skulpt](http://www.skulpt.org/))
 
 The following are not goals for this project:
 
