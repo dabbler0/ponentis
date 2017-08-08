@@ -5,7 +5,9 @@ Ponentis is a small formal logic system right now with the goal of eventually be
 
 The following are goals for this project:
 
-  - A good enough ATP to recognize as correct any line in a proof that should be obvious as formally valid to an untrained reader.
+  - A good enough ATP to recognize as correct:
+    - any line in a proof that should be obvious as formally valid to an untrained reader,
+    - fast enough that a student won't get frustrated when they have to recompile a proof that had a bug.
   - An interactive rendering system that can render only parts of proofs but expand when necessary, so that you can "explore" parts of summarized proofs you want to formalized or don't understand.
   - Readable, "literate" input style a la [knuth](http://www-cs-faculty.stanford.edu/~knuth/lp.html)
   - Output to at least one of the several functional formal proof languages (scheme/haskell/etc.)
@@ -14,11 +16,32 @@ The following are goals for this project:
 
 The following are not goals for this project:
 
-  - To be a good ATP
+  - To be a good ATP.
+    - In fact, it should in some cases be intentionally *not* good so as not to approve a proof whose logic isn't obvious to an untrained human reader
+    - The point is to give students a runtime for their proofs without them having to learn programming; the point is not to generate proofs.
 
 There is currently no input parser, but the goal is for input to eventually look like this:
 
 ```
+TERMS
+    =, *, + (binary infix)
+    0 (atom)
+AXIOMS
+    a = a 'the reflexive property of equality
+    (a = b) => (b = a) 'the commutative property of equality
+    (a = b and b = c) => (a = c) 'the transitive property of equality
+
+    a + b = b + a 'the commutative property of addition
+    (a + b) + c = a + (b + c) 'the associatve property of addition
+    a = b => a + c = b + c 'the substitution law for addition
+    a + c = b + c => 'the cancellation law for addition
+
+    a * b = b * a 'the commutative property of multiplication
+    (a * b) * c = a * (b * c) 'the associatve property of multiplication
+    a = b => a * c = b * c 'the substitution law for multiplication
+    a * c = b * c => 'the cancellation law for multiplication
+    a * (b + c) = a * b + a * c 'the distributive law of addition over multiplication
+
 THEOREM a * 0 = 0
     The trick for this proof is to expand a * (a + 0) in two different ways.
     The first way uses the definition of the additive identity:
