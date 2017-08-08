@@ -31,6 +31,7 @@ AXIOMS
     (a = b) => (b = a) 'the commutative property of equality
     (a = b and b = c) => (a = c) 'the transitive property of equality
 
+    a + 0 = 0 'the definition of the additive identity
     a + b = b + a 'the commutative property of addition
     (a + b) + c = a + (b + c) 'the associatve property of addition
     a = b => a + c = b + c 'the substitution law for addition
