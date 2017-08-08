@@ -35,12 +35,12 @@ AXIOMS
     a + b = b + a 'the commutative property of addition
     (a + b) + c = a + (b + c) 'the associatve property of addition
     a = b => a + c = b + c 'the substitution law for addition
-    a + c = b + c => 'the cancellation law for addition
+    a + c = b + c => a = b 'the cancellation law for addition
 
     a * b = b * a 'the commutative property of multiplication
     (a * b) * c = a * (b * c) 'the associatve property of multiplication
     a = b => a * c = b * c 'the substitution law for multiplication
-    a * c = b * c => 'the cancellation law for multiplication
+    a * c = b * c => a = b 'the cancellation law for multiplication
     a * (b + c) = a * b + a * c 'the distributive law of addition over multiplication
 
 THEOREM a * 0 = 0
