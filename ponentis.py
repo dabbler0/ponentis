@@ -229,6 +229,9 @@ class Node:
     def depth(self):
         return 0
 
+    def subs_all(self, mapping):
+        return Node(frozenset(substitute(k, mapping) for k in self.expressions))
+
     def __init__(self, expressions, prev = None, cost = 0):
         Node._id += 1
         self.id = Node._id
@@ -372,10 +375,16 @@ class ExistsNode(Node):
         Node._id += 1
         self.id = Node._id
 
+    def subs_all(self, mapping):
+        if self.var in mapping:
+            return self.subnode.subs_all(mapping)
+        else:
+            return ExistsNode(self.var, self.subnode.subs_all(mapping))
+
     def wrap_if_necessary(self, subnode):
         varset = get_variables(subnode.innermost_expressions())
         if self.var in varset:
-            return ExistsNode(self.var, subnode, prev = (subnode.prev[0], self))
+            return ExistsNode(self.var, subnode, prev = (subnode.prev[0], self) if len(subnode.prev) == 2 else (subnode.prev[0], self, subnode.prev[2]))
         else:
             return subnode
 
@@ -492,7 +501,7 @@ class ExistsNode(Node):
         final_set = frozenset(substitute(x, leftover_bindings) for x in final_set)
 
         # Wrap in exists as far as necessary
-        node = Node(final_set, prev = (axiom, self), cost = (
+        node = Node(final_set, prev = (axiom, self, (self.var, backward_binding)), cost = (
                 innermost_node.cost + (axiom.cost + EXTRA_VARIABLE_PENALTY * len(leftovers) +
                 EXTRA_TERM_PENALTY * len(new_expressions) +
                 SIZE_PENALTY * size_estimate(new_expressions)) * BACKWARD_EXPANSION_REDUCTION
@@ -500,7 +509,7 @@ class ExistsNode(Node):
         )
 
         for var in leftover_bindings.values():
-            node = ExistsNode(var, node, prev = (axiom, self))
+            node = ExistsNode(var, node, prev = (axiom, self, (self.var, backward_binding)))
 
         # Replace innermost node with the new one
         return self.replace_innermost_node(node)
@@ -705,19 +714,26 @@ def main():
         (eq, zero, (times, a, zero)) # QED
     ]
 
+    # Nice pretty-print procedure
     for i, line in enumerate(proof_lines):
         result = try_proving(line, axiom_list)
+        cumulative_mapping = {}
 
         for j, piece in enumerate(result):
+            if len(piece) == 3:
+                cumulative_mapping[piece[2][0]] = piece[2][1]
+
+        for j, piece in enumerate(result):
+
             if j == 0:
                 print('\nBy %s we have:' % (piece[0].print(),))
             else:
                 print('Then by %s we have:' % (piece[0].print(),))
 
             if j == len(result) - 1:
-                print('  %s [%d]' % (piece[1].print(), i))
+                print('  %s [%d]' % (piece[1].subs_all(cumulative_mapping).print(), i))
             else:
-                print('  %s' % (piece[1].print(),))
+                print('  %s' % (piece[1].subs_all(cumulative_mapping).print(),))
 
         axiom_list += (Axiom((), substitute(line, {a: Variable('a')}), '[%d]' % (i,)),)
 
